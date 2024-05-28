@@ -154,9 +154,9 @@ def write_output(
         conn.execute(last_run_query)
         
         
-        # last_run_query = f"UPDATE icap_datasource_master_table SET last_run_time ='{lastrun_time}'\
-        #     WHERE id = 770 ;"
-        # conn.execute(last_run_query)
+        '''last_run_query = f"UPDATE icap_datasource_master_table SET last_run_time ='{lastrun_time}'\
+            WHERE id = 770 ;"
+        conn.execute(last_run_query)'''
         
         
         print("Last run updated.")

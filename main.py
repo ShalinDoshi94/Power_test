@@ -3,7 +3,7 @@
 # Ingenero's python module for Power Optimization 
 # Developed by : Shivamkumar Kanojia (skanojia@ingenero.com)
 # Developed on : 10/08/2023
-# Last Modified: 12/02/2024
+# Last Modified:
 #
 # ###################################################################
 """
@@ -11,10 +11,9 @@
 """
 import configparser
 import traceback
-from datetime import timedelta
+from datetime import timedelta , datetime
 from time import time
-import math
-import sys
+
 import pandas as pd 
 from gekko import GEKKO
 
@@ -57,7 +56,12 @@ file_list = ["config/config.ini","config/input_alias_map.csv"]
 error_table = parser.get('DB', 'error_table')
 alert_table = parser.get('DB', 'alert_table')
 recommendation_table = parser.get('DB', 'recommendation_table')
-user_opt_table =parser.get('DB', 'user_opt_table')
+what_if_user_opt_table =parser.get('DB', 'what_if_user_opt_table')
+what_if_eqpt_run_status =parser.get('DB', 'what_if_eqpt_run_status')
+what_if_user_input =parser.get('DB', 'what_if_user_input') 
+what_if_alias_mapping =parser.get('DB','what_if_alias_mapping') 
+
+
 logger_config = dict(parser["LOGGER"].items())
 # Creating SQL Logger instance in case of logging directly to SQL (For error logs in ICAP)
 logger = MySQLlogger(
@@ -92,39 +96,40 @@ output_path = parser.get("PATH", "output")
 # import traceback
 
 # from datetime import datetime
-'''Below Function is used to check whether Equipment is under transition State if found
-in transition state then the code will break in in function and will push -9999 in output 
-table.
-'''
+
 def transition_state(time_upto,input_df,db_connection_1,alert_table):
     eqpt_status = []
     status= pd.read_csv('config/transition_alias.csv')
     new_status = status.dropna()
-
-    #Below loop we have removed the transformer from list check Transition state only for Equipments.
     for i,row in new_status.iterrows():
         
         eqpt_status.append(input_df[row['alias']].values[0])
         
         if input_df[row['alias']].values[0] !=0:
-            message = f"{row['Equipment list']} is under Transition State."
+            
+            # delete_query =f"DELETE FROM {alert_table};"
+            # db_connection_1.execute(delete_query)
+            
+            message = f"{row['Equipment list']} is under Transition State"
                     
-            alert_dict = [{'timestamp':time_upto,'category':'Transition State','tag':row['Equipment list'],'message':message,}]
+            alert_dict = [{'timestamp':time_upto,'category':'transition state','tag':row['Equipment list'],'message':message,}]
             alert_df = pd.DataFrame(alert_dict)
             alert_df.to_sql(alert_table, con=db_connection_1, if_exists='append', index=False)
         
     mask = status.index.isin(new_status.index)
     status = status[~mask]
     
-    #In this Below Loop we are checking transition for Only Transformers.
     for i,row in status.iterrows():
+        
+        # eqpt_status.append(input_df[row['alias']].values[0])
+        
         if input_df[row['alias']].values[0] > 0 and input_df[row['alias']].values[0] < 1:
             
             eqpt_status.append(1)
             
-            message = f"{row['alias']} is under Transition State."
+            message = f"{row['alias']} is under Transition State"
                     
-            alert_dict = [{'timestamp':time_upto,'category':'Transition State','description':'-','tag':row['alias'],'message':message}]
+            alert_dict = [{'timestamp':time_upto,'category':'transition state','description':'-','tag':row['alias'],'message':message}]
             alert_df = pd.DataFrame(alert_dict)
             alert_df.to_sql(alert_table, con=db_connection_1, if_exists='append', index=False)
             
@@ -134,19 +139,16 @@ def transition_state(time_upto,input_df,db_connection_1,alert_table):
             
     return eqpt_status
 
-'''Below Function is Used for Data Quality Check if any tag is Out of the training range , it will effects in 
-optimized value that will be retrieved by our Optimization  for that purpose if Tag will be out of bound we are 
-Skipping Optimization at that Timestamp and pushing -9999 to output table '''
+
 def data_quality_check(input_df,time_upto,alert_table,db_connection_1):
     
     #---------------------------------- Data Quality Check ----------------------------------#
-    user_query = f"SELECT * From  {user_opt_table};"
-    # user_query = "SELECT * FROM isspde_011.user_opt_status;"
+    user_query = f"SELECT * From  {what_if_user_opt_table};"
     user_opt_status =  pd.read_sql(user_query,con=db_connection_2)
     user_opt_status=user_opt_status.set_index('Equipment_list')
     
     min_max= pd.read_csv('config/min_max_input_df.csv')
-    out_of_bound = []   
+    out_of_bound = []    
     
     manual_entry_query = "SELECT * FROM isspde_011.manual_entry;"
     manual_entry_table =  pd.read_sql(manual_entry_query,con=db_connection_2)
@@ -155,17 +157,16 @@ def data_quality_check(input_df,time_upto,alert_table,db_connection_1):
     
     for i,row in min_max.iterrows():
         
-        if row['tag'] in manual_ip21_taglist and (input_df[row['DP_OPT  Tag']].values[0] < row['MIN'] or input_df[row['DP_OPT  Tag']].values[0] > row['MAX']) and  manual_entry_table.loc[row['tag'],'substitute'] != -9999:
-            # print(row['tag'],input_df[row['DP_OPT  Tag']].values[0])
+        if row['tag'] in  manual_ip21_taglist and (input_df[row['DP_OPT  Tag']].values[0] <row['MIN'] or input_df[row['DP_OPT  Tag']].values[0] > row['MAX']) and  manual_entry_table.loc[row['tag'],'substitute'] != -9999:
             input_df[row['DP_OPT  Tag']].values[0]= manual_entry_table.loc[row['tag'],'substitute']
+         
         
         elif (input_df[row['DP_OPT  Tag']].values[0] < eval(row['Equipment'])*row['MIN'] or input_df[row['DP_OPT  Tag']].values[0] > row['MAX']):
             
             # user_opt_status.loc[row['eqpt'],'user_status']=0
-            
             out_of_bound.append(1)
             
-            message = f"Tag value {round(input_df[row['DP_OPT  Tag']].values[0],1)} is out of its normal operating range i.e MIN = {row['MIN']} and MAX = {row['MAX']} ."# add substitute value too
+            message = f" Tag value {round(input_df[row['DP_OPT  Tag']].values[0],1)} is out of its training range i.e MIN = {row['MIN']} and MAX = {row['MAX']}."# add substitute value too
             # print(message)
             alert_dict = [{'timestamp':time_upto,'category':'Tag Out Of Bound','description':row['description'],'tag':row['tag'],'message':message,}]
             alert_df = pd.DataFrame(alert_dict)
@@ -173,7 +174,7 @@ def data_quality_check(input_df,time_upto,alert_table,db_connection_1):
         
         else :
             out_of_bound.append(0)
-             
+        
         # try:
             
         #     if (input_df[row['DP_OPT  Tag']].values[0] < eval(row['Equipment'])*row['MIN'] or input_df[row['DP_OPT  Tag']].values[0] > row['MAX']) and (user_opt_status.loc[row['eqpt'],'user_status']==1):
@@ -200,26 +201,18 @@ def data_quality_check(input_df,time_upto,alert_table,db_connection_1):
         #         alert_df = pd.DataFrame(alert_dict)
         #         alert_df.to_sql(alert_table, con=db_connection_1, if_exists='append', index=False)
         #     else :
-        #         out_of_bound.append(0)
-            
-        
-            
+        #         out_of_bound.append(0)         
     return out_of_bound,user_opt_status
+    
 
-    
-'''IF Transition State Check And Quality Check Test is Passed Code will Move to the below function which try to calculate 
-required optimization state for current timestamp if our code wont be able to find the best optmization state for current timestamp 
-it throw and error of "No Solution Found " and will break code and -9999 will be pushed in output table  '''
-def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connection_2,recommendation_table):   
-    
-    
+def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connection_2,recommendation_table): 
+
     #Data Quality Check Doing Here instead of outside function to avoid Multiple Alerts 
-    out_of_bound,user_opt_status = data_quality_check(input_df,last_run_time+interval,alert_table,db_connection_1)
-#__________________________________________________________________________________________________________________________________________________________________________________________________________________________________   
-    #STG C3 Manipilation     
+    out_of_bound,user_opt_status = data_quality_check(input_df,last_run_time+interval,alert_table,db_connection_1)      
+    
+    #STG C3 Manipulation
     if input_df['DP_OPT_RUNNING_STATUS_STG_C3'].values[0] ==1:
-        if input_df['DP_OPT_400STM_PHC_GEN_C3_STG_LBH'].values[0] <10000:
-        # if input_df['DP_OPT_400STM_PHC_GEN_C3_STG_LBH'].values[0] == input_df['DP_OPT_STM_PHC_CONS_PRDS_1250_400_LBH'].values[0]:
+        if input_df['DP_OPT_400STM_PHC_GEN_C3_STG_LBH'].values[0] <10000 :
             new_steam_flow_400_STG_C3 = input_df['DP_OPT_STM_PHC_CONS_PRDS_1250_400_LBH'].values[0]
             new_PRDS_flow_1250_400 = 0
         else:
@@ -232,15 +225,64 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
             
     new_steam_flow_1250_STG_C3= new_steam_flow_400_STG_C3 + input_df['DP_OPT_175STM_PHC_GEN_C3_STG_LBH'].values[0]
     
-    #Header Imbalances
+    #Imbalance
     header_imb_df = pd.read_csv('config/header_imbalances.csv')
     header_imb_df =header_imb_df.set_index('alias')   
     header_imb_df['values']=''
     for i, row in header_imb_df.iterrows():
         # print(eval(row['expression']))
-        row['values']=eval(row['expression'])
-        
+        row['values']=eval(row['expression']) 
 
+    #___________________________________WHAT IF ALTERATION____________________________________________  
+    # what if Equipment Run Status    
+    user_query = f"SELECT * From  {what_if_eqpt_run_status};"
+    what_if_eqpt_run_status_df =  pd.read_sql(user_query,con=db_connection_2)
+    what_if_eqpt_run_status_df = what_if_eqpt_run_status_df.set_index('alias')
+    
+    #Logic for Overwriting values
+    off_to_on_avg_val_substitute_df = pd.read_csv('config/off_to_on_avg_val_substitute.csv')
+    off_to_on_avg_val_substitute_df=off_to_on_avg_val_substitute_df.set_index('run_status_dp_opt_tag')
+    
+    for i,row in off_to_on_avg_val_substitute_df.iterrows():
+        # print(what_if_eqpt_run_status_df.loc[i,'run_status'],input_df[i].values[0])
+            
+        if what_if_eqpt_run_status_df.loc[i,'run_status']==1 and input_df[i].values[0]==0:
+            input_df[row['DP_OPT Tags']].values[0]= row['Average Flow']
+            #print( input_df[row['DP_OPT Tags']].values[0])
+            
+        else:
+            print("error" in row['DP_OPT Tags'])
+    
+    for i,row in what_if_eqpt_run_status_df.iterrows():
+        input_df[i].values[0] = what_if_eqpt_run_status_df.loc[i,'run_status']
+    
+    # what if User Input    
+    user_query = f"SELECT * From  {what_if_user_input};"
+    what_if_user_input_df =  pd.read_sql(user_query,con=db_connection_2)
+    what_if_user_input_df = what_if_user_input_df.set_index('DP_OPT_alias')
+    
+    
+    for i,row in what_if_user_input_df.iterrows():
+        # print(i)
+        # print(what_if_user_input_df.loc[i,'substitue'])
+        input_df[i].values[0] =what_if_user_input_df.loc[i,'substitue']
+        
+        logging.info(input_df[i].values[0])
+        
+    
+    input_df['DP_OPT_REVENUE_STEAM_EXPORT_LACC_DOLLARS'].values[0] = (((input_df['DP_OPT_STM_EXPORT_LACC_1250_600_LBH'].values[0])*1.69*1.744*(input_df['DP_OPT_HENRY_HUB_NG_PRICE_DOLLARPMMBTU'].values[0]))+
+                                                                      (((input_df['DP_OPT_STM_EXPORT_LACC_1250_600_LBH'].values[0]*1.69)-
+                                                                        input_df['DP_OPT_CONDENSATE_FROM_LACC_LBH'].values[0])*1.5)+
+                                                                      ((input_df['DP_OPT_STM_EXPORT_LACC_1250_600_LBH'].values[0])*1.69*1.03))*1.03*(1/1000)
+
+    input_df['DP_OPT_REVENUE_POWER_WITHIN_WL_DOLLARS'].values[0] =((input_df['DP_OPT_POWER_TO_CIRCUITS_MW'].values[0])*7.5*(input_df['DP_OPT_HENRY_HUB_NG_PRICE_DOLLARPMMBTU'].values[0]))/0.293071
+    
+    input_df['DP_OPT_REVENUE_STEAM_WITHIN_WL_DOLLARS'].values[0] =(((((input_df['DP_OPT_HENRY_HUB_NG_PRICE_DOLLARPMMBTU'].values[0])*(input_df['DP_OPT_C_400_Steam_Flow_LBH'].values[0]))*
+                                                                   (input_df['DP_OPT_ENTHALPY_400_STM_PROCESS_BTULB'].values[0]))/1000000)+((input_df['DP_OPT_HENRY_HUB_NG_PRICE_DOLLARPMMBTU'].values[0])*
+                                                                   (input_df['DP_OPT_175STM_PHC_CONS_15_TO_PRCS_LBH'].values[0])*(input_df['DP_OPT_ENTHALPY_175_STM_PROCESS_BTULB'].values[0])/1000000)+
+                                                                   ((input_df['DP_OPT_HENRY_HUB_NG_PRICE_DOLLARPMMBTU'].values[0])*(input_df['DP_OPT_C_30_Steam_Flow_LBH'].values[0])*
+                                                                   (input_df['DP_OPT_LPSTMOL_ENTHALPY_PHC_C4_HRSG_BTULB'].values[0])/1000000))
+#__________________________________________________________________________________________________________________________________________________________________________________________________________________________________   
     m = GEKKO(remote=False )
       
     GT_C1_RUN_STATUS = input_df['DP_OPT_RUNNING_STATUS_GT_C1'].values[0] 
@@ -265,8 +307,7 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
     ''' 
     # OBJECTIVE VARIABLES.
     profit =m.Var(value=input_df['DP_OPT_PROFIT_POWERHOUSE_DOLLARS'].values[0],  lb=input_df['DP_OPT_PROFIT_POWERHOUSE_DOLLARS'].values[0],  ub=100000,  name='profit')
-    
-    
+
     # COST VARIABLES.
     # PP has some internal consumption if generates more than that it can sell it further which is a part of revenue 
     power_export_dollar =m.Var(value=input_df['DP_OPT_REVENUE_POWER_EXPORT_DOLLARS'].values[0],  lb=input_df['DP_OPT_REVENUE_POWER_EXPORT_DOLLARS'].values[0],  ub=1000000,  name='power_export_dollar')
@@ -277,9 +318,8 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
     total_fuel_within_PH_dollar =m.Var(value=input_df['DP_OPT_COST_FUEL_WITHIN_POWERHOUSE_DOLLARS'].values[0],  lb=1*0,  ub=1000000,  name='total_fuel_within_PH_dollar')
     
     # power exported to the grid
-    total_power_export_MW =m.Var(value=input_df['DP_OPT_POWER_EXPORT_MW'].values[0],  lb=1*0,  ub= 360 if (input_df['DP_OPT_TRANSFORMER_T1_STATUS'].values[0]==1 and input_df['DP_OPT_TRANSFORMER_T2_STATUS'].values[0]==1 ) else 180,  name='total_power_export_MW')
-    
-    
+    total_power_export_MW =m.Var(value=input_df['DP_OPT_POWER_EXPORT_MW'].values[0],  lb=1*0,  ub=input_df['DP_OPT_POWER_EXPORT_MW'].values[0] if (input_df['DP_OPT_TRANSFORMER_T1_STATUS'].values[0]==1 and input_df['DP_OPT_TRANSFORMER_T2_STATUS'].values[0]==1 ) else 180,  name='total_power_export_MW')
+   
     '''
     Below we have action variables which are going to be results of our optimizer code 
     ''' 
@@ -308,13 +348,13 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
     STG_R2_Power_MW =m.Var(value=input_df['DP_OPT_PWR_RS_GEN_R2_STG_MW'].values[0]*STG_R2_RUN_STATUS,  lb=0,  ub=50,  name='STG_R2_Power_MW')
     STG_R3_Power_MW =m.Var(value=input_df['DP_OPT_PWR_RS_GEN_R3_STG_MW'].values[0]*STG_R3_RUN_STATUS,  lb=0,  ub=50,  name='STG_R3_Power_MW')
     STG_R4_Power_MW =m.Var(value=input_df['DP_OPT_PWR_RSC_GEN_R4_STG_MW'].values[0]*STG_R4_RUN_STATUS,  lb=0,  ub=100,  name='STG_R4_Power_MW')
-    Power_Gen_MW =m.Var(value=input_df['DP_OPT_C_TOTAL_POWER_GEN_MW'].values[0],  lb=0,  ub=800,  name='Power_Gen_MW')
+    Power_Gen_MW =m.Var(value=input_df['DP_OPT_TOTAL_PWR_GEN_MW'].values[0],  lb=0,  ub=input_df['DP_OPT_TOTAL_PWR_GEN_MW'].values[0],  name='Power_Gen_MW')
     Letdown_1900_TO_600_KLBH =m.Var(value=input_df['DP_OPT_LETDOWN_1900_TO_600_KLBH'].values[0],lb=0,  ub=1000,  name='Letdown_1900_TO_600_KLBH')
     BLR_C1_Steam_Gen_1250_LBH =m.Var(value=input_df['DP_OPT_1250STM_PHC_GEN_C1_BOILER_LBH'].values[0]*BOILER_C1_RUN_STATUS,  lb=0,  ub=1000000,  name='BLR_C1_Steam_Gen_1250_LBH')
     BLR_C2_Steam_Gen_1250_LBH =m.Var(value=input_df['DP_OPT_1250STM_PHC_GEN_C2_BOILER_LBH'].values[0]*BOILER_C2_RUN_STATUS,  lb=0,  ub=1000000,  name='BLR_C2_Steam_Gen_1250_LBH')
     HRSG_C4_Steam_Gen_1250_LBH =m.Var(value=input_df['DP_OPT_1250STM_PHC_GEN_C4_HRSG_LBH'].values[0]*GT_C4_RUN_STATUS,  lb=0,  ub=500000,  name='HRSG_C4_Steam_Gen_1250_LBH')
     HRSG_C5_Steam_Gen_1250_LBH =m.Var(value=input_df['DP_OPT_1250STM_PHC_GEN_C5_HRSG_LBH'].values[0]*GT_C5_RUN_STATUS,  lb=0,  ub=500000,  name='HRSG_C5_Steam_Gen_1250_LBH')
-    Letdown_1250_TO_400_LBH =m.Var(value= new_PRDS_flow_1250_400,  lb=0,  ub=1400000,  name='Letdown_1250_TO_400_LBH')
+    Letdown_1250_TO_400_LBH =m.Var(value=new_PRDS_flow_1250_400,  lb=0,  ub=1400000,  name='Letdown_1250_TO_400_LBH')
     STG_R4_Steam_Gen_600_KLBH =m.Var(value=input_df['DP_OPT_600STM_RSC_GEN_R4_STG_KPPH'].values[0]*STG_R4_RUN_STATUS,  lb=0,  ub=1000,  name='STG_R4_Steam_Gen_600_KLBH')
     STG_C3_Steam_Gen_400_LBH =m.Var(value=input_df['DP_OPT_400STM_PHC_GEN_C3_STG_LBH'].values[0]*STG_C3_RUN_STATUS,  lb=0,  ub=750000,  name='STG_C3_Steam_Gen_400_LBH')
     Letdown_From_400_TO_175_LBH =m.Var(value=input_df['DP_OPT_STM_PHC_CONS_PRDS_400_175_LBH'].values[0],  lb=0,name='Letdown_From_400_TO_175_LBH')
@@ -322,30 +362,31 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
     STEAM_VENTING_LBH =m.Var(value=input_df['DP_OPT_STEAM_VENTING_LBH'].values[0] ,lb=0,ub =300000, name='STEAM_VENTING_LBH')
     Steam_Venting_Dollar=m.Var(lb=0,ub=500,name='Steam_Venting_Dollar')
     
-    #CONSTANTS 
+    #cONSTANTS 
     #Following are the constants that would be used either in Objective function or in expressions 
     power_within_WL_dollar = input_df['DP_OPT_REVENUE_POWER_WITHIN_WL_DOLLARS'].values[0]  
     power_purchased_dollar = input_df['DP_OPT_COST_POWER_PURCHASED_DOLLARS'].values[0]
     steam_within_WL_dollar = input_df['DP_OPT_REVENUE_STEAM_WITHIN_WL_DOLLARS'].values[0]  
     steam_export_LACC_dollar = input_df['DP_OPT_REVENUE_STEAM_EXPORT_LACC_DOLLARS'].values[0]
     LMP_Price_Dollar = input_df['DP_OPT_AXIALL_LMP_PRICE_DOLLARPMWH'].values[0] 
-    power_within_WL_MW = input_df['DP_OPT_C_POWER_WITHIN_POWERHOUSE_MW'].values[0] 
+    # power_within_WL_MW = input_df['DP_OPT_C_POWER_WITHIN_POWERHOUSE_MW'].values[0] 
+    power_within_WL_MW = input_df['DP_OPT_POWER_TO_CIRCUITS_MW'].values[0]+input_df['DP_OPT_AUX_PWR_CONS_MW'].values[0]
+
+        
     
-     
-    #__________________________________________DEFINING OBJECTIVE FUNCTION____________________________________________________________________________________________________________________
-  
+    #__________________________________________DEFINING OBJECTIVE FUNCTION  ____________________________________________________________________________________________________________________  
     '''
     for profit maximization our main aim is to increase our revenue by cutting down the cost
     '''
-    
     m.Maximize(profit)
     
     m.Equation(((power_export_dollar + power_within_WL_dollar + steam_within_WL_dollar + steam_export_LACC_dollar)-
                (power_purchased_dollar + total_fuel_within_PH_dollar+Steam_Venting_Dollar))-profit==0)
    
-    m.Equation(Steam_Venting_Dollar-(STEAM_VENTING_LBH*1.5/1000)==0)
-    #__________________________________________DEFINING CONSTRAINTS____________________________________________________________________________________________________________________
     
+    m.Equation(Steam_Venting_Dollar-(STEAM_VENTING_LBH*1.5/1000)==0)
+    
+    #__________________________________________DEFINING CONSTRAINTS____________________________________________________________________________________________________________________
     # LEVEL_1
     '''
     power_export_dollar
@@ -463,7 +504,7 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
     ''' 
  
     #1900 STEAM BALANCE
-    m.Equation(((HRSG_R5_Steam_Gen_1900_KLBH)+(HRSG_R6_Steam_Gen_1900_KLBH)-(STG_R4_Steam_Cons_1900_KLBH*input_df['DP_OPT_RUNNING_STATUS_STG_R4'].values[0]) -(Letdown_1900_TO_600_KLBH))-(header_imb_df.loc['HEADER_IMBALANCE_1900_KLBH','values'])==0)
+    m.Equation(((HRSG_R5_Steam_Gen_1900_KLBH)+(HRSG_R6_Steam_Gen_1900_KLBH)-(STG_R4_Steam_Cons_1900_KLBH) -(Letdown_1900_TO_600_KLBH))-(header_imb_df.loc['HEADER_IMBALANCE_1900_KLBH','values'])==0)
     
     #1250 STEAM BALANCE
     m.Equation(((BLR_C1_Steam_Gen_1250_LBH)+(BLR_C2_Steam_Gen_1250_LBH)+(HRSG_C4_Steam_Gen_1250_LBH)+(HRSG_C5_Steam_Gen_1250_LBH)-(STG_C3_Steam_Cons_1250_LBH)-(Letdown_1250_TO_400_LBH)-(input_df['DP_OPT_STM_EXPORT_LACC_1250_600_LBH'].values[0]))-(header_imb_df.loc['HEADER_IMBALANCE_1250_LBH','values'])==0)
@@ -472,8 +513,8 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
     m.Equation(((STG_R4_Steam_Gen_600_KLBH)+(Letdown_1900_TO_600_KLBH)-(STG_R3_Steam_Cons_600_KLBH)-(STG_R2_Steam_Cons_600_KLBH)-(input_df['DP_OPT_600STM_CONS_TO_PROCESS_400_KLBH'].values[0]))-(header_imb_df.loc['HEADER_IMBALANCE_600_KLBH','values'])==0)
     
     #400 STEAM BALANCE
-    m.Equation((STG_C3_Steam_Gen_400_LBH)+(Letdown_1250_TO_400_LBH)+(input_df['DP_OPT_600STM_CONS_TO_PROCESS_400_KLBH'].values[0]*1000)-((input_df['DP_OPT_600STM_CONS_TO_PROCESS_400_KLBH'].values[0]*1000)+(input_df['DP_OPT_400STM_PHC_CONS_400_TO_PRCS_LBH'].values[0]))-(Letdown_From_400_TO_175_LBH)-(header_imb_df.loc['HEADER_IMBALANCE_400_LBH','values'])==0)
-    # m.Equation((STG_C3_Steam_Gen_400_LBH)+(Letdown_1250_TO_400_LBH)+(input_df['DP_OPT_600STM_CONS_TO_PROCESS_400_KLBH'].values[0]*1000)-(input_df['DP_OPT_C_400_Steam_Flow_LBH'].values[0])-(Letdown_From_400_TO_175_LBH)-(header_imb_df.loc['HEADER_IMBALANCE_400_LBH','values'])==0)
+    # m.Equation((STG_C3_Steam_Gen_400_LBH)+(Letdown_1250_TO_400_LBH)+(input_df['DP_OPT_600STM_CONS_TO_PROCESS_400_KLBH'].values[0]*1000)-((input_df['DP_OPT_600STM_CONS_TO_PROCESS_400_KLBH'].values[0]*1000)+(input_df['DP_OPT_400STM_PHC_CONS_400_TO_PRCS_LBH'].values[0]))-(Letdown_From_400_TO_175_LBH)-(header_imb_df.loc['HEADER_IMBALANCE_400_LBH','values'])==0)
+    m.Equation((STG_C3_Steam_Gen_400_LBH)+(Letdown_1250_TO_400_LBH)+(input_df['DP_OPT_600STM_CONS_TO_PROCESS_400_KLBH'].values[0]*1000)-(input_df['DP_OPT_C_400_Steam_Flow_LBH'].values[0])-(Letdown_From_400_TO_175_LBH)-(header_imb_df.loc['HEADER_IMBALANCE_400_LBH','values'])==0)
     
     #175 STEAM BALANCE
     m.Equation((Letdown_From_400_TO_175_LBH)+(input_df['DP_OPT_175STM_PHC_GEN_C3_STG_LBH'].values[0]*input_df['DP_OPT_RUNNING_STATUS_STG_C3'].values[0])+(input_df['DP_OPT_175STM_PHC_GEN_C4_HRSG_LBH'].values[0]*input_df['DP_OPT_RUNNING_STATUS_GT_HRSG_C4'].values[0])+(input_df['DP_OPT_175STM_PHC_GEN_C5_HRSG_LBH'].values[0]*input_df['DP_OPT_RUNNING_STATUS_GT_HRSG_C5'].values[0])-(input_df['DP_OPT_175STM_PHC_CONS_15_TO_PRCS_LBH'].values[0])-(Letdown_From_175_TO_30_LBH)-(input_df['DP_OPT_175STM_PHC_CONS_PRV1_5_LBH'].values[0])-(input_df['DP_OPT_175STM_PHC_CONS_PRV2_5_LBH'].values[0])-(input_df['DP_OPT_175STM_PHC_CONS_PRV3_5_LBH'].values[0])-(header_imb_df.loc['HEADER_IMBALANCE_175_LBH','values'])==0)
@@ -494,46 +535,25 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
     
 #___________________________________________________________________________________________________________________________________________________________________________________________    
     '''
-    the scenario where user dont want to optimize certain equipment we have made that provision and that is 
-    stored in a table in form of 1 and 0  in user_opt_table .
+    the scenario where user dont want to optimize certain equipment we have mage that provision and that is 
+    stored in a table in form of 1 and 0 which is stored in user_opt_table .
     
-    '''    
+    '''
+    user_query = f"SELECT * From  {what_if_user_opt_table};"
+    # user_query = "SELECT * FROM isspde_011.user_opt_status;"
+    user_opt_status =  pd.read_sql(user_query,con=db_connection_2)
+    
+    # user_opt_status = pd.read_csv("config/user_opt_status.csv")
+    user_opt_status=user_opt_status.set_index('Equipment_list')
 
-    # user_query = f"SELECT * From  {user_opt_table};"
-    # user_opt_status =  pd.read_sql(user_query,con=db_connection_2)
-    # user_opt_status=user_opt_status.set_index('Equipment_list')
-    
     #Model Accuracy Failed Logic.
     error_prcnt_tag = pd.read_csv('config/error_prcnt_tag.csv')
-    error_prcnt_calc = pd.read_csv('config/error_calculation.csv')
-    error_prcnt_calc = error_prcnt_calc.set_index('error_tag')
-    error_prcnt_calc['value']=''
-    
-    for i,row in error_prcnt_calc.iterrows():
-        if math.isnan(eval(row['expression'])) or math.isinf(eval(row['expression'])): 
-            row['value']=0
-        else:
-            row['value']=eval(row['expression'])
-            
-    error_output_tags=pd.read_csv('config/error_output_alias_map.csv')
-    error_output_tags =error_output_tags.dropna()
-    tag_id=error_output_tags['tag_id'].tolist()
-    no_of_error_output_tags=len(error_output_tags['tag_id'])
-    
-    error_op_dict={}
-    error_op_dict['timestamp']=[time_upto]*no_of_error_output_tags
-    error_op_dict['tag']=tag_id
-    error_op_dict['value']= error_prcnt_calc['value'].tolist()
-    error_op_df=pd.DataFrame(error_op_dict)
-    
-    
     for i,row in error_prcnt_tag.iterrows():
         
-        if abs(error_prcnt_calc.loc[row['error_tag_alias'],'value']) > row['permissible_error'] :
-            
+        if abs(input_df[row['error_tag_alias']].values[0]) > row['permissible_error'] :
             
             user_opt_status.loc[row['equipment'],'user_status']=0    
-            message = f"Please note accuracy of energy coefficient model of {row['equipment']} is not acceptable.(GT and STG > 95 PRCNT, Boiler > 90 PRCNT)" # add substitute value too   
+            message = f"Please note accuracy of energy coefficient model of {row['equipment']} is not acceptable." # add substitute value too   
             category = "Equipment Model Accuracy Low"
             query = f"insert into {alert_table} (timestamp,category,message) values ('{time_upto}','{category}','{message}')"
             db_connection_1.execute(query)
@@ -543,7 +563,6 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
             
         if input_df['DP_OPT_MODE_GT_Boiler_C2'].values[0] ==1 and user_opt_status.loc['BLR C2','user_status']==0 :
             user_opt_status.loc['GT C2','user_status'] ==0
-            
     
     #Base load Logic for GT C1,C2,C4,C5 -----> if value =1 then Don't Optimize.
     base_load_df = pd.read_csv('config/base_load_tag.csv')
@@ -551,18 +570,13 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
         # print(input_df[row['tag']])
         if input_df[row['tag']].values[0]==1:
             # user_opt_status.loc[row['equipment'],'user_status']=0
-            message = f"Please note {row['equipment']} is Base Loaded." # add substitute value too 
-            category = "Base Loaded"
+            
+            message = f"Please note {row['equipment']} is Base Loaded." # add substitute value too
+            
+            category = "Base Load"
             query = f"insert into {alert_table} (timestamp,category,message) values ('{time_upto}','{category}','{message}')"
             db_connection_1.execute(query)
-        else:
-            message = f"Please note {row['equipment']} is not Base Loaded." # add substitute value too 
-            category = " Not Base Loaded"
-            query = f"insert into {alert_table} (timestamp,category,message) values ('{time_upto}','{category}','{message}')"
-            db_connection_1.execute(query)
-            
-            
-    # if STG R2 and R3 are offline are we are not optimizing GT R5 and R6 
+
     if STG_R2_RUN_STATUS==0 and STG_R3_RUN_STATUS ==0:
         
         user_opt_status.loc['STG R4','user_status']=0
@@ -571,6 +585,7 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
         
     else:
         pass
+    
 #___________________________________________________________________________________________________________________________________________________________________________________________    
 
     """
@@ -612,7 +627,6 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
             m.Equation(GT_C1_Power_MW ==0) #dont optimize = 1, Optimze = 0
             
             m.Equation(GT_C1_NG_Flow_SCFH ==0)
-            
 #___________________________________________________________________________________________________________________________________________________________________________________________    
 
     """
@@ -633,16 +647,20 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
     
     else:
         if GT_C2_RUN_STATUS == 1:
-    #GT C2 Linear Equation  
+            #GT C2 Linear Equation  
             m.Equation((-890.572*input_df['DP_OPT_NG_HV_BTU_CF'].values[0]+
                     5961.768*GT_C2_Power_MW+
                     376.4747*input_df['DP_OPT_EXHST_TEMP_PHC_C2_GT_F'].values[0]+
                     920817.2)-(GT_C2_NG_Flow_SCFH)==0)
             
             if input_df['DP_OPT_GT_C2_BASELOADED'].values[0]==1:
+                
                 m.Equation(GT_C2_Power_MW <= input_df['DP_OPT_PWR_PHC_GEN_C2_GT_MW'].values[0])
+                
             else:
+                
                 m.Equation(GT_C2_Power_MW <=((-0.217*input_df['DP_OPT_AMB_TEMP_F'].values[0])+69+4))
+                
             m.Equation(GT_C2_Power_MW >=30)
             m.Equation(GT_C2_NG_Flow_SCFH <=1000000)
             m.Equation(GT_C2_NG_Flow_SCFH >=400000)
@@ -711,9 +729,12 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
                         1162019.041)-(HRSG_C4_Steam_Gen_1250_LBH)==0)
             
             if input_df['DP_OPT_GT_C4_BASELOADED'].values[0]==1:
+                
                 m.Equation(GT_C4_Power_MW <= input_df['DP_OPT_PWR_PHC_GEN_C4_GT_MW'].values[0])
+                
             else:
                 m.Equation(GT_C4_Power_MW <=((-0.29*input_df['DP_OPT_AMB_TEMP_F'].values[0])+97.04+8))
+                
             m.Equation(GT_C4_Power_MW >=30)
             m.Equation(GT_C4_NG_Flow_SCFH <=1000000)
             m.Equation(GT_C4_NG_Flow_SCFH >=400000)
@@ -729,6 +750,7 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
             m.Equation(GT_C4_NG_Flow_SCFH ==0) #dont optimize = 1, Optimze = 0
             
             m.Equation(HRSG_C4_Steam_Gen_1250_LBH ==0)
+        
         
 #___________________________________________________________________________________________________________________________________________________________________________________________    
     
@@ -786,6 +808,7 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
                 m.Equation(GT_C5_Power_MW <= input_df['DP_OPT_PWR_PHC_GEN_C5_GT_MW'].values[0])
             else:
                 m.Equation(GT_C5_Power_MW <=((-0.29*input_df['DP_OPT_AMB_TEMP_F'].values[0])+97.04))
+
             m.Equation(GT_C5_Power_MW >=20)
             m.Equation(GT_C5_NG_Flow_SCFH <= 1000000)
             m.Equation(GT_C5_NG_Flow_SCFH >= 400000)
@@ -795,11 +818,9 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
             
             # m.Equation(GT_C5_NG_Flow_SCFH - GT_C5_RUN_STATUS*GT_C5_NG_Flow_Leq_SCFH==0) #dont optimize = 1, Optimze = 0
             
-            # m.Equation(HRSG_C5_Steam_Gen_1250_LBH - GT_C5_RUN_STATUS*HRSG_C5_Steam_Gen_1250_Leq_LBH==0)
-        
-            
+            # m.Equation(HRSG_C5_Steam_Gen_1250_LBH - GT_C5_RUN_STATUS*HRSG_C5_Steam_Gen_1250_Leq_LBH==0)    
         else:
-            m.Equation(GT_C5_Power_MW  ==0) #dont optimize = 1, Optimze = 0
+            m.Equation(GT_C5_Power_MW ==0) #dont optimize = 1, Optimze = 0
             
             m.Equation(GT_C5_NG_Flow_SCFH ==0) #dont optimize = 1, Optimze = 0
             
@@ -993,7 +1014,7 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
                 
                 
                 m.Equation(FHRSG_C1_NG_SCFH <=750000)
-                m.Equation(FHRSG_C1_NG_SCFH >=180000)
+                m.Equation(FHRSG_C1_NG_SCFH >=100000)
                 m.Equation(BLR_C1_Steam_Gen_1250_LBH <=675000)
                 m.Equation(BLR_C1_Steam_Gen_1250_LBH >=100000)
                 
@@ -1044,7 +1065,7 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
                 
                
                 m.Equation(FHRSG_C1_NG_SCFH <=750000)
-                m.Equation(FHRSG_C1_NG_SCFH >=180000)
+                m.Equation(FHRSG_C1_NG_SCFH >=100000)
                 m.Equation(BLR_C1_Steam_Gen_1250_LBH <=675000)
                 m.Equation(BLR_C1_Steam_Gen_1250_LBH >=100000)
                 # m.Equation(FHRSG_C1_NG_SCFH - input_df['DP_OPT_MODE_BOILER_ONLY_C1'].values[0]*Boiler_C1_RUN_STATUS*FHRSG_C1_NG_Leq_SCFH==0)
@@ -1096,7 +1117,7 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
                             975964.533)-(FHRSG_C2_NG_SCFH)==0)
                 
                 m.Equation(FHRSG_C2_NG_SCFH <=750000)
-                m.Equation(FHRSG_C2_NG_SCFH >=180000)
+                m.Equation(FHRSG_C2_NG_SCFH >=150000)
                 m.Equation(BLR_C2_Steam_Gen_1250_LBH <=675000)
                 m.Equation(BLR_C2_Steam_Gen_1250_LBH >=100000)
                 # m.Equation(FHRSG_C2_NG_SCFH - input_df['DP_OPT_MODE_GT_Boiler_C2'].values[0]*GT_C2_RUN_STATUS*Boiler_C2_RUN_STATUS*FHRSG_C2_NG_Leq_SCFH==0)
@@ -1147,7 +1168,7 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
                             1991202.108)-(FHRSG_C2_NG_SCFH)==0)
                 
                 m.Equation(FHRSG_C2_NG_SCFH <=750000)
-                m.Equation(FHRSG_C2_NG_SCFH >=180000)
+                m.Equation(FHRSG_C2_NG_SCFH >=150000)
                 m.Equation(BLR_C2_Steam_Gen_1250_LBH <=675000)
                 m.Equation(BLR_C2_Steam_Gen_1250_LBH >=100000)
   
@@ -1159,7 +1180,7 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
                 
                 m.Equation(FHRSG_C2_NG_SCFH ==0)
         
-                m.Equation(BLR_C2_Steam_Gen_1250_LBH==0)   
+                m.Equation(BLR_C2_Steam_Gen_1250_LBH==0)  
 
 #_____________________________________________________________________________________________________________________________________________    
     
@@ -1291,10 +1312,7 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
             
             m.Equation(STG_R2_Power_MW == 0)
             
-            m.Equation(STG_R2_Steam_Cons_600_KLBH== 0)
- 
- 
-    
+            m.Equation(STG_R2_Steam_Cons_600_KLBH== 0) 
  #_____________________________________________________________________________________________________________________________________________    
 
     """
@@ -1344,8 +1362,6 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
     # m.options.COLDSTART=2
     # m.solve(disp=True)
     # m.open_folder() 
-    
-    
     comparison_scripts = pd.read_csv('config/actual_and_optimized_alias.csv')
     actual_list = comparison_scripts['actual'].tolist()
       
@@ -1359,6 +1375,7 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
     
     
     try:
+       
         try:
             m.solve(disp=False) # solve
             print("Solution Found Successfully in Default residual Tolerance")
@@ -1378,7 +1395,7 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
 #______________________________LOGIC FOR EXTRA CALC KPI AND PROFIT MANIPULATION_____________________________________________________________            
         
         tag_alias=list(output_tags['tag_alias'])
-        length_removal = 53
+        length_removal = 50
         tag_alias= tag_alias[:no_of_output_tags - length_removal] 
         
         output_dict = {}
@@ -1390,15 +1407,14 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
         if total_power_export_MW.value[0] > 225:
             power_export_dollar_manipulated = ((total_power_export_MW.value[0]-225)*LMP_Price_Dollar+((225*7.5*input_df['DP_OPT_HENRY_HUB_NG_PRICE_DOLLARPMMBTU'].values[0])/0.293071))
             
-            profit_manipulated =(power_export_dollar_manipulated + power_within_WL_dollar + steam_within_WL_dollar + steam_export_LACC_dollar)-(power_purchased_dollar + total_fuel_within_PH_dollar.value[0] +Steam_Venting_Dollar.value[0])
+            profit_manipulated =(power_export_dollar_manipulated + power_within_WL_dollar + steam_within_WL_dollar + steam_export_LACC_dollar)-(power_purchased_dollar + total_fuel_within_PH_dollar.value[0] + Steam_Venting_Dollar.value[0])
         
-            output_df.loc['OP4_OPT_PROFIT_POWERHOUSE_DOLLARS','value']=profit_manipulated
-            output_df.loc['OP4_OPT_REVENUE_POWER_EXPORT_DOLLARS','value']=power_export_dollar_manipulated
-
+            output_df.loc['OP9_WIF_PROFIT_POWERHOUSE_DOLLARS','value']=profit_manipulated
+            output_df.loc['OP9_WIF_REVENUE_POWER_EXPORT_DOLLARS','value']=power_export_dollar_manipulated
+        
             opt_val[0]=profit_manipulated
             opt_val[1]=power_export_dollar_manipulated
             
-                    
         else:
             power_export_dollar_manipulated = power_export_dollar.value[0]
             
@@ -1418,100 +1434,55 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
 #___________________________________________________________________________________________________________________            
         
         op_dict={}
-        op_dict['timestamp']=[time_upto]*no_of_output_tags
+        op_dict['timestamp']=[datetime.now()]*no_of_output_tags
         op_dict['tag']=tag_id
         op_dict['value']= opt_val
         op_df=pd.DataFrame(op_dict)
         
         # op_df_2=pd.DataFrame(op_dict)
         
-        
         if profit_manipulated < input_df['DP_OPT_PROFIT_POWERHOUSE_DOLLARS'].values[0] :
             
-           
             del op_df     # deleting previous op_df to make new one 
             
             op_dict={}
-            op_dict['timestamp']=[time_upto]*no_of_output_tags
+            op_dict['timestamp']=[datetime.now()]*no_of_output_tags
             op_dict['tag']=tag_id
             op_dict['value']= -9999
+            # op_dict['value']= act_val
             op_df=pd.DataFrame(op_dict)
-            
-            message = "System at Optimized State Any further increase in power generation and export might not be so beneficial, possibly due to current LMP price of power." # add substitute value too
+
+            message = "System is at Optimized State. Any further increase in power generation and export might not be so beneficial, possibly due to current LMP price of power." # add substitute value too
             category = "System is at Optimized State"
             query = f"insert into {alert_table} (timestamp,category,message) values ('{time_upto}','{category}','{message}')"
             db_connection_1.execute(query)
             print("profit manipulated is less then actual")
-       
-        else:
-        
-            reco_df = pd.read_csv('config/recommendation_tags.csv')
-
-
-            for i,row in reco_df.iterrows() :
-                    
-                x= locals()[row['opt_2']][0]
-                x= round(x,1) 
-                
-                y= locals()[row['opt_1']][0]
-                y= round(y,1)
-                
-                #Overall tags
-                Total_Power_Gen_PHC = GT_C1_Power_MW[0] + GT_C2_Power_MW[0] + GT_C4_Power_MW[0] + GT_C5_Power_MW[0] + STG_C3_Power_MW[0] 
-                Total_Power_Gen_RSC = GT_R5_Power_MW[0] + GT_R6_Power_MW[0] + STG_R2_Power_MW[0] + STG_R3_Power_MW[0] + STG_R4_Power_MW[0]
-                Total_1250_Gen = BLR_C1_Steam_Gen_1250_LBH[0] + BLR_C2_Steam_Gen_1250_LBH[0] + HRSG_C4_Steam_Gen_1250_LBH[0] + HRSG_C5_Steam_Gen_1250_LBH[0]
-                Total_1900_Gen = HRSG_R5_Steam_Gen_1900_KLBH[0] + HRSG_R6_Steam_Gen_1900_KLBH[0]  
-                #print(x,round(input_df[row['alias_2']].values[0],1))
-                
-                if input_df[row['running_status']].values[0]==1  :
-                    # print(input_df[row['running_status']].values[0])
-                    
-                    if user_opt_status.loc[row['user_opt_status'],'user_status']==1 :
-                        
-                        if round(input_df[row['alias_2']].values[0],1)!=x and (x > 1.03*input_df[row['alias_2']].values[0] or x < 0.97*input_df[row['alias_2']].values[0]) :
-                        #     print(user_opt_status.loc[row['user_opt_status'],'user_status'])
-                            #print(round(input_df[row['alias_2']].values[0],1),x)
-                
-                            # message = f"optimized value for {row['Equipment']} {row['comment']} i.e {row['tag_1']} is {x} {row['uom_1']} greater than actual value {input_df[row['alias_1']].values[0]} {row['uom_1']}"
-                            # message = f"Change {row['Equipment']} {row['comment']} i.e {row['tag_2']} from {round(input_df[row['alias_2']].values[0],1)} {row['uom_2']} to {x} {row['uom_2']},in steps. "
-                            message = f"Change {row['comment']} i.e {row['tag_2']} from {round(input_df[row['alias_2']].values[0],1)} {row['uom_2']} to {x} {row['uom_2']},in steps. "
-                            eqpt=f"{row['Equipment']}"
-                            model_acc = round(100 - abs(error_prcnt_calc.loc[row['model_accuracy'],'value']),2)
-                            heat_rate = round(input_df[row['heat_rate_tag']].values[0],2) if row['heat_rate_tag'] != '-' else '-'
-                            impact_message = f"Change {row['comment_impact']} i.e {row['tag_1']} from {round(input_df[row['alias_1']].values[0],1)} {row['uom_1']} to {y} {row['uom_1']},in steps. "
-                            plant = f"{row['plant']}"
-                            #print(message)
-                            query = f"insert into {recommendation_table} (timestamp,equipment,recommendation,model_accuracy,heat_rate,impact,plant) values ('{time_upto}','{eqpt}','{message}','{model_acc}','{heat_rate}','{impact_message}','{plant}')"
-                            db_connection_2.execute(query)
-                            # print(message)
-
-                        else:
-                            pass
-                    else:
-                        pass
-                else:
-                    pass
-                   
             
+        else:
+            pass
+            # No Recommnedation is needed for what if Table so this section is empty.
+        
+        
     except:
-        # m.open_folder()
         print('Not successful')
         print(traceback.format_exc())
         
-        message = "Model could not find Optimized State" # add substitute value too
+        # delete_query =f"DELETE FROM {alert_table};"
+        # db_connection_1.execute(delete_query)
+
+        message = "Model could not find Optimized State."# add substitute value too
         category = "No Solution Found"
         query = f"insert into {alert_table} (timestamp,category,message) values ('{time_upto}','{category}','{message}')"
         db_connection_1.execute(query)
-        
+
         op_dict={}
-        op_dict['timestamp']=[time_upto]*no_of_output_tags
+        op_dict['timestamp']=[datetime.now()]*no_of_output_tags
         op_dict['tag']=tag_id
         op_dict['value']= -9999
         # op_dict['value']= act_val
         op_df=pd.DataFrame(op_dict)
-    
-        
-    # Generating Alert for Equipment which are not selected for optimization at current timestamp.
+
+     # Generating Alert for Equipment which are not selected for optimization at current timestamp.
     dont_opt_list = []
     for i, row  in user_opt_status.iterrows():
         if row['user_status']==0:
@@ -1524,17 +1495,12 @@ def optimization_model(input_df,time_upto,alert_table,db_connection_1,db_connect
      # Please note either of the {residual_list_new} is being operated below their minimum operation limit. Please check 'Limits screen' for more details
     category = "Dont Optimize"
     query = f"insert into {alert_table} (timestamp,category,message) values ('{last_run_time+interval}','{category}','{message}')"
-    db_connection_1.execute(query)  
-    
-    #Merge Optimized Data and Error Data 
-    op_df = pd.concat([op_df,error_op_df],ignore_index=True)
-              
-    
+    db_connection_1.execute(query) 
+
     return op_df
 #________________________________________________________________________________________________________________________________________________________
-#last_run_time =pd.to_datetime('2023-05-21 03:00:00')
-#last_run_time=pd.to_datetime('2022-05-12 22:00:00')
-#while last_run_time < pd.to_datetime('21-May-2024'):
+last_run_time =pd.to_datetime('2023-11-25 05:00:00')
+# while last_run_time < pd.to_datetime('06-Dec-2023'):
 if __name__ == "__main__":
     # start loop (here condition can be changed as per use case)
     # get start time of code.
@@ -1590,6 +1556,9 @@ if __name__ == "__main__":
                 db_connection_1                
             )
             interval = timedelta(minutes=running_interval)
+            
+            last_run_time = last_run_time-interval #to get current Screen TImestamp
+            
             print(f"Last run time : {last_run_time}")
             logging.info("Last run time : %s", last_run_time)
             # Read input from input table. In case of multiple tables, call the \
@@ -1642,6 +1611,14 @@ if __name__ == "__main__":
             # results are to be returned.
             
             
+            #Clear Alert Log of previous run 
+            delete_query =f"DELETE FROM {alert_table};"
+            db_connection_1.execute(delete_query)
+            
+            #Clear output table of previous run
+            delete_query= f"DELETE FROM {db_config['output_table']};"
+            db_connection_1.execute(delete_query)
+            
             
             #Westlake Feedback
             if input_df['DP_OPT_AIROUT_TEMP_PHC_C1_GT_F'].values[0] <=500 or input_df['DP_OPT_AIROUT_TEMP_PHC_C1_GT_F'].values[0] >= 700 :
@@ -1677,35 +1654,43 @@ if __name__ == "__main__":
                     pass
             else:
                 pass
-
-
-#______________________________________________________CODE FLOW___________________________________________________________________________________________________________________________________________________________________________________
-# '''
-# Transtion State Check --PASS-->  Quality Check(Out of Bound) --PASS--> OPtimized State --PASS-->  [Profit Manipulated < Actual Profit] --PASS-->  Output Table(Optimized value) ----> (Update Last Runtime)
-
-#            |                              |                                     |                                  | 
-#           FAIL                           FAIL                           No Solution Found  <-----------------------  
-#            |                              |                                     |
-#            v                              v                                     v
-#          -9999                          -9999                                 -9999
-#     (Output Table)                  (Output Table)                        (Output Table)
-#            |                              |                                     |
-#            v                              v                                     v
-# (Update Last Runtime)           (Update Last Runtime)                 (Update Last Runtime)
+            
+#           ___________________________________MISC CALCULATION_____________________________________________                 
+            #Pushing Actual value multiplied by the Running Status Before overwriting Input df 
+            misc_act_tag =pd.read_csv("config/misc_actual_tag.csv") 
+            misc_list =[]
+            
+            for i,row in misc_act_tag.iterrows():
+                
+                try:
+                    misc_val = input_df[row['DP_OPT_Tag']].values[0]*input_df[row['RUN_STATUS']].values[0]
+                except:
+                    misc_val = input_df[row['DP_OPT_Tag']].values[0]
+                # print(misc_val)    
+                misc_list.append(misc_val)
+                
+            misc_output_tags=pd.read_csv('config/misc_output_alias_map.csv')
+            misc_output_tags =misc_output_tags.dropna()
+            misc_tag_id=list(misc_output_tags['tag_id'])
+            no_of_misc_output_tags=len(list(misc_output_tags['tag_id']))
+            
+            misc_op_dict={}
+            misc_op_dict['timestamp']=[datetime.now()]*no_of_misc_output_tags
+            misc_op_dict['tag']=misc_tag_id
+            misc_op_dict['value']= misc_list
+            misc_output_data=pd.DataFrame(misc_op_dict)
         
-# '''      
-
-#_________________________________________________________________________________________________________________________________________________________________________________________________________________________________________ 
+#___________________________________________________________________________________________________________________________________
             
-            
-
             if (input_df['DP_OPT_C_TOTAL_POWER_GEN_MW'].values[0]== input_df['DP_OPT_C_TTL_POWER_GEN_STATUS_MW'].values[0]) and (input_df['DP_OPT_C_TOTAL_NG_CONS_MMSCFD'].values[0]== input_df['DP_OPT_C_TTL_NG_CONS_RUN_MMSCFD'].values[0]):
+            
+                transition_list = transition_state(last_run_time+interval,input_df,db_connection_1,alert_table) #Equipment Transition Check
                 
-                transition_list = transition_state(last_run_time+interval,input_df,db_connection_1,alert_table)
-                
-                #quality_check_list = data_quality_check(input_df,last_run_time+interval,alert_table,db_connection_1)
+                #quality_check_list = data_quality_check(input_df,last_run_time+interval,alert_table,db_connection_1) #Data Quality Check 
                
                 if all([v == 0 for v in transition_list]) :
+
+                    # opt_output_data = optimization_model(input_df,last_run_time+interval,alert_table,db_connection_1,db_connection_2,recommendation_table)
                     
                     # if 1 in quality_check_list :
                     #     output_tags=pd.read_csv('config/output_alias_map.csv')
@@ -1714,12 +1699,12 @@ if __name__ == "__main__":
                     #     no_of_output_tags=len(list(output_tags['tag_id']))
                         
                     #     op_dict={}
-                    #     op_dict['timestamp']=[last_run_time+interval]*no_of_output_tags
+                    #     op_dict['timestamp']=[datetime.now()]*no_of_output_tags
                     #     op_dict['tag']=tag_id
                     #     op_dict['value']= -9999
-                    #     opt_output_data=pd.DataFrame(op_dict)
+                    #     opt_output_data=pd.DataFrame(op_dict)    
                     # else:
-                     opt_output_data = optimization_model(input_df,last_run_time+interval,alert_table,db_connection_1,db_connection_2,recommendation_table)
+                    opt_output_data = optimization_model(input_df,last_run_time+interval,alert_table,db_connection_1,db_connection_2,recommendation_table)
                                
                 else:
                     output_tags=pd.read_csv('config/output_alias_map.csv')
@@ -1728,18 +1713,17 @@ if __name__ == "__main__":
                     no_of_output_tags=len(list(output_tags['tag_id']))
                     
                     op_dict={}
-                    op_dict['timestamp']=[last_run_time+interval]*no_of_output_tags
+                    op_dict['timestamp']=[datetime.now()]*no_of_output_tags
                     op_dict['tag']=tag_id
                     op_dict['value']= -9999
                     opt_output_data=pd.DataFrame(op_dict)
-            
+                    
             else:
                 
                 run_status_residual_check =pd.read_csv("config/run status residual check.csv")
                 residual_list = []
                 for i ,row in run_status_residual_check.iterrows():
                     if input_df[row['DP_OPT_TAG']].values[0]<1:
-                        print(input_df[row['DP_OPT_TAG']].values[0])
                         residual_list.append(row['Equipment'])
                     else:
                         pass
@@ -1758,48 +1742,82 @@ if __name__ == "__main__":
                 # residual_list_new = str(residual_list)[1:-1]
                 residual_list_new= (', '.join(residual_list)) #removing Brackets and Quotes from list
                 
-                message = f"Please note either of the {residual_list_new} is being operated below their minimum operation limit. Please check Optz Model-Residual Error Screen for more details." # add substitute value too
+                message = f"Please note either of the {residual_list_new} is being operated below their minimum operation limit.Please check Optz Model-Residual Error Screen for more details." # add substitute value too
                 
                 # Please note either of the {residual_list_new} is being operated below their minimum operation limit. Please check 'Limits screen' for more details
                 category = "Residual Value Error"
                 query = f"insert into {alert_table} (timestamp,category,message) values ('{last_run_time+interval}','{category}','{message}')"
                 db_connection_1.execute(query)
-                
-                
+                              
 #___________________________________MISC CALCULATION_____________________________________________                 
             
-            misc_act_tag =pd.read_csv("config/misc_actual_tag.csv") 
-            misc_list =[]
-            for i,row in misc_act_tag.iterrows():
-                
-                misc_val = input_df[row['DP_OPT_Tag']].values[0]*input_df[row['RUN_STATUS']].values[0]
-                misc_list.append(misc_val)
-                
-            misc_output_tags=pd.read_csv('config/misc_output_alias_map.csv')
-            misc_output_tags =misc_output_tags.dropna()
-            misc_tag_id=list(misc_output_tags['tag_id'])
-            no_of_misc_output_tags=len(list(misc_output_tags['tag_id']))
+            # misc_act_tag =pd.read_csv("config/misc_actual_tag.csv") 
+            # misc_list =[]
             
-            misc_op_dict={}
-            misc_op_dict['timestamp']=[last_run_time+interval]*no_of_misc_output_tags
-            misc_op_dict['tag']=misc_tag_id
-            misc_op_dict['value']= misc_list
-            misc_output_data=pd.DataFrame(misc_op_dict)
+            # for i,row in misc_act_tag.iterrows():
+                
+            #     try:
+            #         misc_val = input_df[row['DP_OPT_Tag']].values[0]*input_df[row['RUN_STATUS']].values[0]
+            #     except:
+            #         misc_val = input_df[row['DP_OPT_Tag']].values[0]
+            #     # print(misc_val)    
+            #     misc_list.append(misc_val)
+                
+            # misc_output_tags=pd.read_csv('config/misc_output_alias_map.csv')
+            # misc_output_tags =misc_output_tags.dropna()
+            # misc_tag_id=list(misc_output_tags['tag_id'])
+            # no_of_misc_output_tags=len(list(misc_output_tags['tag_id']))
+            
+            # misc_op_dict={}
+            # misc_op_dict['timestamp']=[datetime.now()]*no_of_misc_output_tags
+            # misc_op_dict['tag']=misc_tag_id
+            # misc_op_dict['value']= misc_list
+            # misc_output_data=pd.DataFrame(misc_op_dict)
             
             output_data = pd.concat([opt_output_data,misc_output_data],ignore_index=True)
-    
-            # print(output_data)
-            # Writing output to either DB or csv based on mode selected. \
-            # Structure needs to be (timestamp,tag,value).
+           
+            #CODE for Pushing OUTPUT Data in SQL alias mapping table for display on WHAT iF Screen 
+            misc_tag_alias = list(misc_output_tags['tag_alias'])
+            output_tags=pd.read_csv('config/output_alias_map.csv')
+            output_tags =output_tags.dropna()
+            tag_alias=list(output_tags['tag_alias'])
+            
+            all_op_alias =tag_alias + misc_tag_alias
+                
+            output_what_if_mapping_df= output_data.copy()
+            output_what_if_mapping_df['tag_alias'] =all_op_alias
+            output_what_if_mapping_df=output_what_if_mapping_df.set_index('tag_alias')
+            
+            
+            
+            query = f"SELECT * From {what_if_alias_mapping};"
+            what_if_alias_mapping_df_1 =  pd.read_sql(query,con=db_connection_2)
+            what_if_alias_mapping_df =what_if_alias_mapping_df_1.set_index('OP9_alias')
+            
+            for i ,row in what_if_alias_mapping_df.iterrows():
+                try:
+                   what_if_alias_mapping_df.loc[i,'value']=output_what_if_mapping_df.loc[i,'value']
                     
+                except  KeyError: 
+                    pass
+                    
+            what_if_alias_mapping_df =what_if_alias_mapping_df.reset_index()
+            
+            for i in what_if_alias_mapping_df.index:    
+                output_query = f"INSERT INTO {what_if_alias_mapping} (`id`,value)VALUES ({what_if_alias_mapping_df.at[i,'id']},{what_if_alias_mapping_df.at[i,'value']}) ON DUPLICATE key UPDATE value={what_if_alias_mapping_df.at[i,'value']};"
+                #print(output_query)
+                db_connection_2.execute(output_query)
+            
+            
+            
             write_output(
                 exec_mode,
                 output_data,
-                last_run_time + interval,
+                datetime.now(),
                 db_config["output_table"],
                 db_connection_1,
                 db_config["lastrun_table"],
-                db_config["id"],
+                db_config["what_if_id"],
                 output_path
             )
         except NoDataException:
@@ -1819,13 +1837,13 @@ if __name__ == "__main__":
     end_time = time()
     print(f"Execution completed in {end_time-start}s.")
     logging.info("Execution completed in %s.", end_time - start)
-    print("X-----X----X------X------X-------X------X-----X")
-    # sys.exit("Exiting....")
+    
 #_______________________________________________________________________________________________________________________________    
     
     # Comparison Scripts 
     
     '''
+    
     comparison_scripts = pd.read_csv('config/actual_and_optimized_alias.csv')
     # comparison_scripts['actual value'] =''
     # comparison_scripts['optimized value'] =''
@@ -1870,13 +1888,6 @@ if __name__ == "__main__":
     df = pd.melt(input_df)
     
     # --------------------------------------------------------
-    
-    (((-450.194*input_df['DP_OPT_NG_HV_BTU_CF'].values[0]+6477.206*input_df['DP_OPT_PWR_PHC_GEN_C1_GT_MW'].values[0]+323.091*input_df['DP_OPT_AIROUT_TEMP_PHC_C1_GT_F'].values[0]-191.434*input_df['DP_OPT_AMB_TEMP_F'].values[0]+22.19*input_df['DP_OPT_RELATIVE_HUMIDITY_PCNT'].values[0]+88.864*input_df['DP_OPT_EXHST_TEMP_PHC_C1_GT_F'].values[0]+518927.909)-input_df['DP_OPT_NG_PHC_CONS_C1_GT_SCFH'].values[0])/input_df['DP_OPT_NG_PHC_CONS_C1_GT_SCFH'].values[0])*100*input_df['DP_OPT_RUNNING_STATUS_GT_C1'].values[0]
-    
-    
-    
-    
-    
     
     '''
     
